@@ -13,14 +13,14 @@ Bugs are naturally mine. I'd be glad to hear about them. There are certainly wor
 :license: GNU GPL v2, see LICENSE for more details.
 """
 
-import os
-import select
+from os import getpid
+from select import select
 import signal
 import socket
-import struct
-import sys
+from struct import pack, unpack
+from sys import exit, byteorder, exc_info
 from time import perf_counter, sleep
-
+from logging_setup import logger
 
 # ICMP parameters
 ICMP_ECHOREPLY = 0  # Echo reply (per RFC792)
@@ -33,8 +33,7 @@ MAX_SLEEP = 1000
 def calculate_checksum(source_string):
     """
     A port of the functionality of in_cksum() from ping.c
-    Ideally this would act on the string as a series of 16-bit ints (host
-    packed), but this works.
+    Ideally this would act on the string as a series of 16-bit ints (host packed), but this works.
     Network data is big-endian, hosts are typically little-endian
     """
     countTo = (int(len(source_string) / 2)) * 2
@@ -43,7 +42,7 @@ def calculate_checksum(source_string):
 
     # Handle bytes in pairs (decoding as short ints)
     while count < countTo:
-        if sys.byteorder == "little":
+        if byteorder == "little":
             loByte = source_string[count]
             hiByte = source_string[count + 1]
         else:
@@ -105,32 +104,28 @@ class Response(object):
 
 
 class Ping(object):
-    def __init__(self, destination, timeout=1000, packet_size=55, own_id=None, quiet_output=True, udp=False, bind=None):
-        self.quiet_output = quiet_output
-        if quiet_output:
-            self.response = Response()
-            self.response.destination = destination
-            self.response.timeout = timeout
-            self.response.packet_size = packet_size
-
+    def __init__(self, destination, timeout, max_rtt, delay_between_pings, count, packet_size=55, own_id=None, bind=None):
+        self.error = False
         self.destination = destination
         self.timeout = timeout
+        self.max_rtt = max_rtt
+        self.delay_between_pings = delay_between_pings
+        self.count = count
         self.packet_size = packet_size
-        self.udp = udp
         self.bind = bind
+        self.is_failed = None
 
         if own_id is None:
-            self.own_id = os.getpid() & 0xFFFF
+            self.own_id = getpid() & 0xFFFF
         else:
             self.own_id = own_id
 
         try:
             # FIXME: Use destination only for display this line here? see: https://github.com/jedie/python-ping/issues/3
             self.dest_ip = to_ip(self.destination)
-            if quiet_output:
-                self.response.destination_ip = self.dest_ip
         except socket.gaierror as e:
             self.print_unknown_host(e)
+            self.error = True
         else:
             self.print_start()
 
@@ -144,84 +139,73 @@ class Ping(object):
     # --------------------------------------------------------------------------
 
     def print_start(self):
-        msg = "\nPYTHON-PING %s (%s): %d data bytes" % (self.destination, self.dest_ip, self.packet_size)
-        if self.quiet_output:
-            self.response.output.append(msg)
-        else:
-            print(msg)
+        msg = f"PYTHON-PING {self.destination} ({self.dest_ip}): {self.packet_size} data bytes"
+        logger.debug(msg)
 
     def print_unknown_host(self, e):
-        msg = "\nPYTHON-PING: Unknown host: %s (%s)\n" % (self.destination, e.args[1])
-        if self.quiet_output:
-            self.response.output.append(msg)
-            self.response.ret_code = 1
-        else:
-            print(msg)
-
-        raise Exception("unknown_host")
-
-    # sys.exit(-1)
+        msg = f"PYTHON-PING: Unknown host: {self.destination} ({e.args[1]})"
+        if self.is_failed is None or not self.is_failed:
+            logger.error(msg)
+            self.is_failed = True
 
     def print_success(self, delay, ip, packet_size, ip_header, icmp_header):
         if ip == self.destination:
             from_info = ip
         else:
-            from_info = "%s (%s)" % (self.destination, ip)
+            from_info = f"{self.destination} ({ip})"
 
         msg = f"{packet_size} bytes from {from_info}: icmp_seq={icmp_header['seq_number']} ttl={ip_header['ttl']} time={delay:.1f} ms"
-
-        if self.quiet_output:
-            self.response.output.append(msg)
-            self.response.ret_code = 0
-        else:
-            print(msg)
+        msg_success_after_failure = f"PYTHON-PING: Ping to {from_info} was successful: icmp_seq={icmp_header['seq_number']} time={delay:.1f} ms"
+        if self.is_failed is None or self.is_failed:
+            logger.info(msg_success_after_failure)
+            self.is_failed = False
+        logger.debug(msg)
 
     # print("IP header: %r" % ip_header)
     # print("ICMP header: %r" % icmp_header)
 
-    def print_failed(self):
-        msg = "Request timed out."
-
-        if self.quiet_output:
-            self.response.output.append(msg)
-            self.response.ret_code = 1
+    def print_failed(self, ip):
+        if ip == self.destination:
+            from_info = ip
         else:
-            print(msg)
+            from_info = f"{self.destination} ({ip})"
+        msg = f"PYTHON-PING: Request to {from_info} timed out."
+        if self.is_failed is None or not self.is_failed:
+            logger.error(msg)
+            self.is_failed = True
+
+    def print_timed_out(self, ip):
+        if ip == self.destination:
+            from_info = ip
+        else:
+            from_info = f"{self.destination} ({ip})"
+        msg = f"PYTHON-PING: ICMP response from {from_info} was received but the time exceeded the set timeout period of {self.timeout}ms."
+        if self.is_failed is None or not self.is_failed:
+            logger.error(msg)
+            self.is_failed = True
+
+    def print_rtt_timed_out(self, ip):
+        if ip == self.destination:
+            from_info = ip
+        else:
+            from_info = f"{self.destination} ({ip})"
+        msg = f"PYTHON-PING: ICMP response from {from_info} was received but the time exceeded the set max rtt period of {self.max_rtt}ms."
+        if self.is_failed is None or not self.is_failed:
+            logger.error(msg)
+            self.is_failed = True
 
     def print_exit(self):
-        msg = f"\n----{self.destination} PYTHON PING Statistics----"
-
-        if self.quiet_output:
-            self.response.output.append(msg)
-        else:
-            print(msg)
-
         lost_count = self.send_count - self.receive_count
         # print("%i packets lost" % lost_count)
         lost_rate = float(lost_count) / self.send_count * 100.0
 
-        msg = f"{self.send_count} packets transmitted, {self.receive_count} packets received, {lost_rate:.1f}% packet loss"
+        msg = f"PYTHON-PING: ({self.destination}) {self.send_count} packets transmitted, {self.receive_count} packets received, {lost_rate:.1f}% packet loss"
 
-        if self.quiet_output:
-            self.response.output.append(msg)
-            self.response.packet_lost = lost_count
-        else:
-            print(msg)
+        logger.debug(msg)
 
         if self.receive_count > 0:
-            msg = "round-trip (ms)  min/avg/max = %0.3f/%0.3f/%0.3f" % (self.min_time, self.total_time / self.receive_count, self.max_time)
-            if self.quiet_output:
-                self.response.min_rtt = f'{self.min_time:.3f}'
-                self.response.avg_rtt = f'{(self.total_time / self.receive_count):.3f}'
-                self.response.max_rtt = f'{self.max_time:.3f}'
-                self.response.output.append(msg)
-            else:
-                print(msg)
-
-        if self.quiet_output:
-            self.response.output.append('\n')
-        else:
-            print('')
+            msg = f"PYTHON-PING: ({self.destination}) round-trip (ms)  min/avg/max = {self.min_time:.3f}/{(self.total_time / self.receive_count):.3f}/{self.max_time:.3f}"
+            logger.debug(msg)
 
     # --------------------------------------------------------------------------
 
@@ -232,13 +216,8 @@ class Ping(object):
         self.print_exit()
         msg = f"\n(Terminated with signal {signum})\n"
 
-        if self.quiet_output:
-            self.response.output.append(msg)
-            self.response.ret_code = 0
-        else:
-            print(msg)
-
-        sys.exit(0)
+        logger.debug(msg)
+        exit(0)
 
     def setup_signal_handler(self):
         signal.signal(signal.SIGINT, self.signal_handler)  # Handle Ctrl-C
@@ -251,47 +230,37 @@ class Ping(object):
     @staticmethod
     def header2dict(names, struct_format, data):
         """ unpack the raw received IP and ICMP header information to a dict """
-        unpacked_data = struct.unpack(struct_format, data)
+        unpacked_data = unpack(struct_format, data)
         return dict(zip(names, unpacked_data))
 
     # --------------------------------------------------------------------------
 
-    def run(self, count=None, deadline=None):
+    def run(self):
         """
         send and receive pings in a loop. Stop if count or until deadline.
         """
-        if not self.quiet_output:
-            self.setup_signal_handler()
+        if self.error:
+            return
 
+        self.setup_signal_handler()
         while True:
-            delay = self.do()
+            self.do()
 
             self.seq_number += 1
-            if count and self.seq_number >= count:
-                break
-            if deadline and self.total_time >= deadline:
-                break
+            # if count and self.seq_number == count:
+            #     break
+            # if deadline and self.total_time >= deadline:
+            #     break
 
-            if delay is None:
-                delay = 0
-
-            # Pause for the remainder of the MAX_SLEEP period (if applicable)
-            if MAX_SLEEP > delay:
-                sleep((MAX_SLEEP - delay) / 1000.0)
-
-        self.print_exit()
-        if self.quiet_output:
-            return self.response
+            self.print_exit()
+            sleep(self.delay_between_pings)
 
     def do(self):
         """
         Send one ICMP ECHO_REQUEST and receive the response until self.timeout
         """
-        try:  # One could use UDP here, but it's obscure
-            if self.udp:
-                current_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.getprotobyname("icmp"))
-            else:
-                current_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.getprotobyname("icmp"))
+        try:
+            current_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.getprotobyname("icmp"))
 
             # Bind the socket to a source address
             if self.bind:
@@ -300,12 +269,10 @@ class Ping(object):
         except socket.error as msg:
             if msg == 1:
                 # Operation not permitted - Add more information to traceback
-                etype, evalue, etb = sys.exc_info()
-                evalue = etype(
-                    "%s - Note that ICMP messages can only be send from processes running as root." % evalue
-                )
-                raise etype(evalue).with_traceback(etb)
-            raise  # raise the original error
+                etype, evalue, etb = exc_info()
+                evalue = etype(f"{evalue} - Note that ICMP messages can only be send from processes running as root.")
+                logger.critical(f"{evalue}\n{etb}")
+            return
 
         send_time = self.send_one_ping(current_socket)
         if send_time is None:
@@ -318,6 +285,12 @@ class Ping(object):
         if receive_time:
             self.receive_count += 1
             delay = (receive_time - send_time) * 1000.0
+            if delay > self.timeout:
+                self.print_timed_out(ip)
+                return delay
+            elif delay > self.max_rtt:
+                self.print_rtt_timed_out(ip)
+                return delay
             self.total_time += delay
             if self.min_time > delay:
                 self.min_time = delay
@@ -327,7 +300,7 @@ class Ping(object):
             self.print_success(delay, ip, packet_size, ip_header, icmp_header)
             return delay
         else:
-            self.print_failed()
+            self.print_failed(ip)
 
     def send_one_ping(self, current_socket):
         """
@@ -337,9 +310,7 @@ class Ping(object):
         checksum = 0
 
         # Make a dummy header with a 0 checksum.
-        header = struct.pack(
-            "!BBHHH", ICMP_ECHO, 0, checksum, self.own_id, self.seq_number
-        )
+        header = pack("!BBHHH", ICMP_ECHO, 0, checksum, self.own_id, self.seq_number)
 
         padBytes = []
         startVal = 0x42
@@ -352,9 +323,7 @@ class Ping(object):
 
         # Now that we have the right checksum, we put that in. It's just easier
         # to make up a new header than to stuff it into the dummy.
-        header = struct.pack(
-            "!BBHHH", ICMP_ECHO, 0, checksum, self.own_id, self.seq_number
-        )
+        header = pack("!BBHHH", ICMP_ECHO, 0, checksum, self.own_id, self.seq_number)
 
         packet = header + data
 
@@ -363,7 +332,7 @@ class Ping(object):
         try:
             current_socket.sendto(packet, (self.destination, 1))  # Port number is irrelevant for ICMP
         except socket.error as e:
-            self.response.output.append(f"General failure ({e.args[1]})")
+            logger.error(f"General failure ({e.args[1]})")
             current_socket.close()
             return
 
@@ -377,7 +346,7 @@ class Ping(object):
 
         while True:  # Loop while waiting for packet or timeout
             select_start = perf_counter()
-            inputready, outputready, exceptready = select.select([current_socket], [], [], timeout)
+            inputready, outputready, exceptready = select([current_socket], [], [], timeout)
             select_duration = (perf_counter() - select_start)
             if not inputready:  # timeout
                 return None, 0, 0, 0, 0
@@ -406,7 +375,7 @@ class Ping(object):
                     data=packet_data[:20]
                 )
                 packet_size = len(packet_data) - 28
-                ip = socket.inet_ntoa(struct.pack("!I", ip_header["src_ip"]))
+                ip = socket.inet_ntoa(pack("!I", ip_header["src_ip"]))
                 # XXX: Why not ip = address[0] ???
                 return receive_time, packet_size, ip, ip_header, icmp_header
 
@@ -415,6 +384,6 @@ class Ping(object):
                 return None, 0, 0, 0, 0
 
 
-def ping(hostname, timeout=1000, count=3, packet_size=55, *args, **kwargs):
-    p = Ping(hostname, timeout, packet_size, *args, **kwargs)
-    return p.run(count)
+def ping(hostname, delay_between_pings, timeout, count, max_rtt):
+    p = Ping(hostname, timeout, max_rtt, delay_between_pings, count)
+    p.run()
