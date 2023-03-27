@@ -1,6 +1,6 @@
 import os.path
 from logging_setup import logger
-from time import sleep, time
+from time import time
 from watchdog.observers import Observer
 from watchdog.events import PatternMatchingEventHandler
 
@@ -23,6 +23,6 @@ class FileHandler:
         self.watched_dir = os.path.split(self.file_path)[0]
         self.observer = Observer()
 
-    def run(self):
+    async def run(self):
         self.observer.schedule(self.event_handler, self.watched_dir, recursive=False)
         self.observer.start()

@@ -12,14 +12,14 @@ Bugs are naturally mine. I'd be glad to hear about them. There are certainly wor
 :copyleft: 1989-2011 by the python-ping team, see AUTHORS for more details.
 :license: GNU GPL v2, see LICENSE for more details.
 """
-
+import asyncio
 from os import getpid
 from select import select
 import signal
 import socket
 from struct import pack, unpack
 from sys import exit, byteorder, exc_info
-from time import perf_counter, sleep
+from time import perf_counter
 from logging_setup import logger
 
 # ICMP parameters
@@ -104,7 +104,7 @@ class Response(object):
 
 
 class Ping(object):
-    def __init__(self, destination, timeout, max_rtt, delay_between_pings, count, packet_size=55, own_id=None, bind=None):
+    def __init__(self, destination, timeout, count, delay_between_pings, max_rtt, packet_size=55, own_id=None, bind=None):
         self.error = False
         self.destination = destination
         self.timeout = timeout
@@ -139,7 +139,7 @@ class Ping(object):
     # --------------------------------------------------------------------------
 
     def print_start(self):
-        msg = f"PYTHON-PING {self.destination} ({self.dest_ip}): {self.packet_size} data bytes"
+        msg = f"PYTHON-PING: {self.destination} ({self.dest_ip}): {self.packet_size} data bytes"
         logger.debug(msg)
 
     def print_unknown_host(self, e):
@@ -154,7 +154,7 @@ class Ping(object):
         else:
             from_info = f"{self.destination} ({ip})"
 
-        msg = f"{packet_size} bytes from {from_info}: icmp_seq={icmp_header['seq_number']} ttl={ip_header['ttl']} time={delay:.1f} ms"
+        msg = f"PYTHON-PING: {packet_size} bytes from {from_info}: icmp_seq={icmp_header['seq_number']} ttl={ip_header['ttl']} time={delay:.1f} ms"
         msg_success_after_failure = f"PYTHON-PING: Ping to {from_info} was successful: icmp_seq={icmp_header['seq_number']} time={delay:.1f} ms"
         if self.is_failed is None or self.is_failed:
             logger.info(msg_success_after_failure)
@@ -235,10 +235,7 @@ class Ping(object):
 
     # --------------------------------------------------------------------------
 
-    def run(self):
-        """
-        send and receive pings in a loop. Stop if count or until deadline.
-        """
+    async def run(self):
         if self.error:
             return
 
@@ -247,17 +244,13 @@ class Ping(object):
             self.do()
 
             self.seq_number += 1
-            # if count and self.seq_number == count:
-            #     break
-            # if deadline and self.total_time >= deadline:
-            #     break
 
             self.print_exit()
-            sleep(self.delay_between_pings)
+            await asyncio.sleep(self.delay_between_pings)
 
     def do(self):
         """
-        Send one ICMP ECHO_REQUEST and receive the response until self.timeout
+        Send one ICMP ECHO_REQUEST and receive the response
         """
         try:
             current_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.getprotobyname("icmp"))
@@ -285,17 +278,17 @@ class Ping(object):
         if receive_time:
             self.receive_count += 1
             delay = (receive_time - send_time) * 1000.0
+            self.total_time += delay
+            if self.min_time > delay:
+                self.min_time = delay
+            if self.max_time < delay:
+                self.max_time = delay
             if delay > self.timeout:
                 self.print_timed_out(ip)
                 return delay
             elif delay > self.max_rtt:
                 self.print_rtt_timed_out(ip)
                 return delay
-            self.total_time += delay
-            if self.min_time > delay:
-                self.min_time = delay
-            if self.max_time < delay:
-                self.max_time = delay
 
             self.print_success(delay, ip, packet_size, ip_header, icmp_header)
             return delay
@@ -384,6 +377,6 @@ class Ping(object):
                 return None, 0, 0, 0, 0
 
 
-def ping(hostname, delay_between_pings, timeout, count, max_rtt):
-    p = Ping(hostname, timeout, max_rtt, delay_between_pings, count)
-    p.run()
+async def ping(hostname, timeout, count, delay_between_pings, max_rtt):
+    p = Ping(hostname, timeout, count, delay_between_pings, max_rtt)
+    await p.run()
