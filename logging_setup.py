@@ -1,6 +1,8 @@
 from sys import stdout
 import logging
 
+logging.getLogger('asyncio').setLevel(logging.WARNING)
+logging.getLogger('watchdog').setLevel(logging.INFO)
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 formatter = logging.Formatter(fmt='%(asctime)s | %(levelname)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S')

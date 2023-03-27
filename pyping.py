@@ -260,11 +260,10 @@ class Ping(object):
                 current_socket.bind((self.bind, 0))  # Port number is irrelevant for ICMP
 
         except socket.error as msg:
-            if msg == 1:
-                # Operation not permitted - Add more information to traceback
-                etype, evalue, etb = exc_info()
-                evalue = etype(f"{evalue} - Note that ICMP messages can only be send from processes running as root.")
-                logger.critical(f"{evalue}\n{etb}")
+            # Operation not permitted - Add more information to traceback
+            etype, evalue, etb = exc_info()
+            evalue = etype(f"{evalue} - Note that ICMP messages can only be send from processes running as root.")
+            logger.critical(f"{evalue}\n{etb}")
             return
 
         send_time = self.send_one_ping(current_socket)
