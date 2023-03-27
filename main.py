@@ -6,9 +6,9 @@ from pyping import ping
 
 
 async def check_modification(_loop, old, new):
+
     old_keys = set(old.keys())
     new_keys = set(new.keys())
-
     only_old = sorted(old_keys - new_keys)
     only_new = sorted(new_keys - old_keys)
     both = sorted(old_keys & new_keys)
@@ -57,6 +57,10 @@ async def monitor_host_changes(_loop):
         if FileHandler.is_modified:
             with open("hosts.json", "r") as f:
                 host_details_json = json.load(f)
+                if (len(host_details_json)) > 50:
+                    logger.critical(f"The number of hosts has exceeded the allowed 50. "
+                                    f"Please remove some of the hosts if you want to add new ones.")
+                    continue
             FileHandler.is_modified = False
             await check_modification(_loop, old_details, host_details_json)
             old_details = host_details_json
