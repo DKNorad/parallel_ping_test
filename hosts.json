@@ -1,0 +1,26 @@
+{
+  "google.com": {
+    "timeout": 3,
+    "sleep_period": 3,
+    "count": 1,
+    "max_rtt": 150
+  },
+  "youtube.com": {
+    "timeout": 3,
+    "sleep_period": 2,
+    "count": 1,
+    "max_rtt": 1000
+  },
+  "10.3.53.200": {
+    "timeout": 2,
+    "sleep_period": 15,
+    "count": 1,
+    "max_rtt": 15
+  },
+  "10.3.96.112": {
+    "timeout": 2,
+    "sleep_period": 15,
+    "count": 1,
+    "max_rtt": 15
+  }
+}
