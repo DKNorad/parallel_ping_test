@@ -85,6 +85,6 @@ async def create(_loop, host, details):
 if __name__ == '__main__':
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.create_task(FileHandler("./hosts.json").run(), name="File Handler")
+    loop.create_task(FileHandler("./", "hosts.json").run(), name="File Handler")
     loop.create_task(monitor_host_changes(loop), name="Task manager")
     loop.run_forever()
