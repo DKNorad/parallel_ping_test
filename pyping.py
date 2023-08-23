@@ -15,12 +15,12 @@ Bugs are naturally mine. I'd be glad to hear about them. There are certainly wor
 import asyncio
 from os import getpid
 from select import select
-import signal
 import socket
 from struct import pack, unpack
-from sys import exit, byteorder, exc_info
+from sys import byteorder, exc_info
 from time import perf_counter
 from logging_setup import logger
+import ipaddress
 
 # ICMP parameters
 ICMP_ECHOREPLY = 0  # Echo reply (per RFC792)
@@ -68,26 +68,6 @@ def calculate_checksum(source_string):
     return answer
 
 
-def is_valid_ip4_address(addr):
-    parts = addr.split(".")
-    if not len(parts) == 4:
-        return False
-    for part in parts:
-        try:
-            number = int(part)
-        except ValueError:
-            return False
-        if number > 255 or number < 0:
-            return False
-    return True
-
-
-def to_ip(addr):
-    if is_valid_ip4_address(addr):
-        return addr
-    return socket.gethostbyname(addr)
-
-
 class Response(object):
     def __init__(self):
         self.max_rtt = None
@@ -104,9 +84,10 @@ class Response(object):
 
 
 class Ping(object):
-    def __init__(self, destination, timeout, count, delay_between_pings, max_rtt, packet_size=55, own_id=None, bind=None):
+    def __init__(self, ip, destination, timeout, count, delay_between_pings, max_rtt, packet_size=55, own_id=None, bind=None):
         self.error = False
-        self.destination = destination
+        self.destination = ip
+        self.hostname = destination
         self.timeout = timeout
         self.max_rtt = max_rtt
         self.delay_between_pings = delay_between_pings
@@ -115,19 +96,15 @@ class Ping(object):
         self.bind = bind
         self.is_failed = None
 
+        if ip != destination:
+            self.from_info = f"{self.hostname} ({ip})"
+        else:
+            self.from_info = ip
+
         if own_id is None:
             self.own_id = getpid() & 0xFFFF
         else:
             self.own_id = own_id
-
-        try:
-            # FIXME: Use destination only for display this line here? see: https://github.com/jedie/python-ping/issues/3
-            self.dest_ip = to_ip(self.destination)
-        except socket.gaierror as e:
-            self.print_unknown_host(e)
-            self.error = True
-        else:
-            self.print_start()
 
         self.seq_number = 0
         self.send_count = 0
@@ -136,96 +113,64 @@ class Ping(object):
         self.max_time = 0.0
         self.total_time = 0.0
 
-    # --------------------------------------------------------------------------
-
-    def print_start(self):
-        msg = f"PYTHON-PING: {self.destination} ({self.dest_ip}): {self.packet_size} data bytes"
-        logger.debug(msg)
-
-    def print_unknown_host(self, e):
-        msg = f"PYTHON-PING: Unknown host: {self.destination} ({e.args[1]})"
-        if self.is_failed is None or not self.is_failed:
-            logger.error(msg)
-            self.is_failed = True
-
-    def print_success(self, delay, ip, packet_size, ip_header, icmp_header):
-        if ip == self.destination:
-            from_info = ip
-        else:
-            from_info = f"{self.destination} ({ip})"
-
-        msg = f"PYTHON-PING: {packet_size} bytes from {from_info}: icmp_seq={icmp_header['seq_number']} ttl={ip_header['ttl']} time={delay:.1f} ms"
-        msg_success_after_failure = f"PYTHON-PING: Ping to {from_info} was successful: icmp_seq={icmp_header['seq_number']} time={delay:.1f} ms"
+    def print_success(self, delay, packet_size, ip_header, icmp_header):
+        msg = f"PYTHON-PING: {packet_size} bytes from {self.from_info}: icmp_seq={icmp_header['seq_number']} ttl={ip_header['ttl']} time={delay:.1f} ms"
+        msg_success_after_failure = f"PYTHON-PING: Ping to {self.from_info} was successful: icmp_seq={icmp_header['seq_number']} time={delay:.1f} ms"
         if self.is_failed is None or self.is_failed:
             logger.info(msg_success_after_failure)
             self.is_failed = False
-        logger.debug(msg)
-
-    # print("IP header: %r" % ip_header)
-    # print("ICMP header: %r" % icmp_header)
-
-    def print_failed(self, ip):
-        if ip == self.destination:
-            from_info = ip
         else:
-            from_info = f"{self.destination} ({ip})"
-        msg = f"PYTHON-PING: Request to {from_info} timed out."
+            logger.debug(msg)
+
+    def print_failed(self):
+        msg = f"PYTHON-PING: Request to {self.from_info} timed out."
         if self.is_failed is None or not self.is_failed:
             logger.error(msg)
             self.is_failed = True
 
-    def print_timed_out(self, ip):
-        if ip == self.destination:
-            from_info = ip
-        else:
-            from_info = f"{self.destination} ({ip})"
-        msg = f"PYTHON-PING: ICMP response from {from_info} was received but the time exceeded the set timeout period of {self.timeout}ms."
+    def print_timed_out(self):
+        msg = (f"PYTHON-PING: ICMP response from {self.from_info} "
+               f"was received but the time exceeded the set timeout period of {self.timeout}ms.")
         if self.is_failed is None or not self.is_failed:
             logger.error(msg)
             self.is_failed = True
 
-    def print_rtt_timed_out(self, ip):
-        if ip == self.destination:
-            from_info = ip
-        else:
-            from_info = f"{self.destination} ({ip})"
-        msg = f"PYTHON-PING: ICMP response from {from_info} was received but the time exceeded the set max rtt period of {self.max_rtt}ms."
+    def print_rtt_timed_out(self):
+        msg = (f"PYTHON-PING: ICMP response from {self.from_info} "
+               f"was received but the time exceeded the set max rtt period of {self.max_rtt}ms.")
         if self.is_failed is None or not self.is_failed:
             logger.error(msg)
             self.is_failed = True
 
     def print_exit(self):
         lost_count = self.send_count - self.receive_count
-        # print("%i packets lost" % lost_count)
         lost_rate = float(lost_count) / self.send_count * 100.0
 
-        msg = f"PYTHON-PING: ({self.destination}) {self.send_count} packets transmitted, {self.receive_count} packets received, {lost_rate:.1f}% packet loss"
-
+        msg = (f"PYTHON-PING: ({self.destination}) {self.send_count} packets transmitted, "
+               f"{self.receive_count} packets received, {lost_rate:.1f}% packet loss")
         logger.debug(msg)
 
         if self.receive_count > 0:
-            msg = f"PYTHON-PING: ({self.destination}) round-trip (ms)  min/avg/max = {self.min_time:.3f}/{(self.total_time / self.receive_count):.3f}/{self.max_time:.3f}"
+            msg = (f"PYTHON-PING: ({self.destination}) round-trip (ms)  min/avg/max = {self.min_time:.3f}/"
+                   f"{(self.total_time / self.receive_count):.3f}/{self.max_time:.3f}")
             logger.debug(msg)
 
-    # --------------------------------------------------------------------------
+    # def signal_handler(self, signum):
+    #     """
+    #     Handle print_exit via signals
+    #     """
+    #     self.print_exit()
+    #     msg = f"\nPYTHON-PING: (Terminated with signal {signum})\n"
+    #
+    #     logger.debug(msg)
+    #     exit(0)
+    #
+    # def setup_signal_handler(self):
+    #     signal.signal(signal.SIGINT, self.signal_handler)  # Handle Ctrl-C
+    #     if hasattr(signal, "SIGBREAK"):
+    #         # Handle Ctrl-Break e.g. under Windows
+    #         signal.signal(signal.SIGBREAK, self.signal_handler)
 
-    def signal_handler(self, signum):
-        """
-        Handle print_exit via signals
-        """
-        self.print_exit()
-        msg = f"\n(Terminated with signal {signum})\n"
-
-        logger.debug(msg)
-        exit(0)
-
-    def setup_signal_handler(self):
-        signal.signal(signal.SIGINT, self.signal_handler)  # Handle Ctrl-C
-        if hasattr(signal, "SIGBREAK"):
-            # Handle Ctrl-Break e.g. under Windows
-            signal.signal(signal.SIGBREAK, self.signal_handler)
-
-    # --------------------------------------------------------------------------
 
     @staticmethod
     def header2dict(names, struct_format, data):
@@ -239,7 +184,7 @@ class Ping(object):
         if self.error:
             return
 
-        self.setup_signal_handler()
+        # self.setup_signal_handler()
         while True:
             self.do()
 
@@ -259,11 +204,11 @@ class Ping(object):
             if self.bind:
                 current_socket.bind((self.bind, 0))  # Port number is irrelevant for ICMP
 
-        except socket.error as msg:
-            # Operation not permitted - Add more information to traceback
+        except socket.error:
             etype, evalue, etb = exc_info()
-            evalue = etype(f"{evalue} - Note that ICMP messages can only be send from processes running as root.")
-            logger.critical(f"{evalue}\n{etb}")
+            evalue = etype(f"PYTHON-PING: {evalue}"
+                           f" - Note that ICMP messages can only be send from processes running as root.")
+            logger.critical(f"PYTHON-PING: {evalue}\n{etb}")
             return
 
         send_time = self.send_one_ping(current_socket)
@@ -283,16 +228,16 @@ class Ping(object):
             if self.max_time < delay:
                 self.max_time = delay
             if delay > self.timeout:
-                self.print_timed_out(ip)
+                self.print_timed_out()
                 return delay
             elif delay > self.max_rtt:
-                self.print_rtt_timed_out(ip)
+                self.print_rtt_timed_out()
                 return delay
 
-            self.print_success(delay, ip, packet_size, ip_header, icmp_header)
+            self.print_success(delay, packet_size, ip_header, icmp_header)
             return delay
         else:
-            self.print_failed(ip)
+            self.print_failed()
 
     def send_one_ping(self, current_socket):
         """
@@ -324,7 +269,8 @@ class Ping(object):
         try:
             current_socket.sendto(packet, (self.destination, 1))  # Port number is irrelevant for ICMP
         except socket.error as e:
-            logger.error(f"General failure ({e.args[1]})")
+            msg = f"PYTHON-PING: {self.destination} ({e.args[1]})"
+            logger.error(msg)
             current_socket.close()
             return
 
@@ -368,7 +314,6 @@ class Ping(object):
                 )
                 packet_size = len(packet_data) - 28
                 ip = socket.inet_ntoa(pack("!I", ip_header["src_ip"]))
-                # XXX: Why not ip = address[0] ???
                 return receive_time, packet_size, ip, ip_header, icmp_header
 
             timeout = timeout - select_duration
@@ -376,6 +321,30 @@ class Ping(object):
                 return None, 0, 0, 0, 0
 
 
-async def ping(hostname, timeout, count, delay_between_pings, max_rtt):
-    p = Ping(hostname, timeout, count, delay_between_pings, max_rtt)
+def is_valid_ip4_address(addr):
+    try:
+        ipaddress.ip_address(addr)
+        return True
+    except ValueError:
+        if addr.replace('.', '').isnumeric():
+            logger.error(f"PYTHON-PING: {addr} is an invalid IPv4 address")
+        return False
+
+
+async def resolve_ip(destination, delay):
+    if is_valid_ip4_address(destination):
+        return destination
+
+    while True:
+        try:
+            ip_addr = socket.gethostbyname(destination)
+            return ip_addr
+        except socket.gaierror as e:
+            logger.error(f"PYTHON-PING: Unknown host: {destination} ({e.args[1]})")
+            await asyncio.sleep(delay)
+
+
+async def ping(hostname, timeout, count, delay_between_pings, max_rtt, packet_size):
+    destination_ip = await resolve_ip(hostname, delay_between_pings)
+    p = Ping(destination_ip, hostname, timeout, count, delay_between_pings, max_rtt, packet_size)
     await p.run()
