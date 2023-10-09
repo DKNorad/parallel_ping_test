@@ -1,14 +1,14 @@
 # Parallel Ping Testing
 ## Changelog:
+23-Aug-2023
+- Improved the way the script checks if the destination is a valid IPv4 address.
+- Improved the DNS function.
+- Code clean up in pyping.py.
+
 22-Aug-2023
 - Implemented packet size in the hosts file.
 - Fixed the file handler.
 - Fixed some logging problems.
-- Code clean up in pyping.py.
-
-23-Aug-2023
-- Improved the way the script checks if the destination is a valid IPv4 address.
-- Improved the DNS function.
 - Code clean up in pyping.py.
 
 ## Resources used:
