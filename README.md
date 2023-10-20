@@ -1,6 +1,6 @@
 # Parallel Ping Testing
 ## Description:
-Run concurrent ping tests to chosen destinations using the asyncio library.
+Run concurrent ping tests to a chosen destinations using the asyncio library.
 
 The script takes the entries from the hosts.json file and creates a task for each.
 Hosts structure:
